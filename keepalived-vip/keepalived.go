@@ -21,7 +21,7 @@ import (
 	"fmt"
 	"os"
 	"os/exec"
-	"syscall"
+	"sort"
 	"text/template"
 
 	"github.com/golang/glog"
@@ -54,6 +54,16 @@ type keepalived struct {
 	notify      string
 }
 
+type vipInfo struct {
+	IP   string
+	Vrid int
+}
+
+type VipsInfo struct {
+	Master  vipInfo
+	Backups []vipInfo
+}
+
 // WriteCfg creates a new keepalived configuration file.
 // In case of an error with the generation it returns the error
 func (k *keepalived) WriteCfg(svcs []vip) error {
@@ -64,7 +74,7 @@ func (k *keepalived) WriteCfg(svcs []vip) error {
 	defer w.Close()
 
 	k.vips = getVIPs(svcs)
-
+	nodeVIPs := GetVIPsForNode(k.ip, k.neighbors, k.vips, k.vrid)
 	conf := make(map[string]interface{})
 	conf["iptablesChain"] = iptablesChain
 	conf["iface"] = k.iface
@@ -72,6 +82,8 @@ func (k *keepalived) WriteCfg(svcs []vip) error {
 	conf["netmask"] = k.netmask
 	conf["svcs"] = svcs
 	conf["vips"] = getVIPs(svcs)
+	conf["masterVip"] = nodeVIPs.Master
+	conf["backupVips"] = nodeVIPs.Backups
 	conf["nodes"] = k.neighbors
 	conf["priority"] = k.priority
 	conf["useUnicast"] = k.useUnicast
@@ -87,9 +99,51 @@ func (k *keepalived) WriteCfg(svcs []vip) error {
 	return k.tmpl.Execute(w, conf)
 }
 
+func GetVIPsForNode(nodeIP string, neighbors []string, vips []string, vrid int) (myVips *VipsInfo) {
+	allNodesIps := removeDuplicates(append(neighbors, nodeIP))
+	nodesTotal := len(allNodesIps)
+	vipsTotal := len(vips)
+	startVrid := vrid
+	if nodesTotal > vipsTotal {
+		glog.Warningf("There is not enough virtual IPs. Total nodes: %v. Total virtual IPs: %v", nodesTotal, vipsTotal)
+	}
+	sort.Strings(allNodesIps)
+	currentNodeIndex := sort.SearchStrings(allNodesIps, nodeIP)
+
+	sort.Strings(vips)
+	myVips = new(VipsInfo)
+	for index, ip := range vips {
+		info := vipInfo{
+			IP:   ip,
+			Vrid: startVrid,
+		}
+		startVrid++
+		if index == currentNodeIndex {
+			myVips.Master = info
+		} else {
+			myVips.Backups = append(myVips.Backups, info)
+		}
+	}
+	return
+}
+
+func removeDuplicates(elements []string) []string {
+	encountered := map[string]bool{}
+	result := []string{}
+
+	for v := range elements {
+		if encountered[elements[v]] == false {
+			encountered[elements[v]] = true
+			result = append(result, elements[v])
+		}
+	}
+	return result
+}
+
 // getVIPs returns a list of the virtual IP addresses to be used in keepalived
 // without duplicates (a service can use more than one port)
 func getVIPs(svcs []vip) []string {
+	//return []string{"172.16.4.37", "172.16.4.36"}
 	result := []string{}
 	for _, svc := range svcs {
 		result = appendIfMissing(result, svc.IP)
